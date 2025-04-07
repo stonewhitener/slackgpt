@@ -13,6 +13,7 @@ oauth_config:
       - im:history
       - mpim:history
       - reactions:write
+      - files:read
 settings:
   event_subscriptions:
     bot_events:

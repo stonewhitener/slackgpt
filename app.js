@@ -1,5 +1,7 @@
+const util = require('util')
 const { App } = require('@slack/bolt');
 const { OpenAI } = require('openai');
+const { DatabaseSync } = require('node:sqlite');
 
 const app = new App({
     token: process.env.SLACK_BOT_TOKEN,
@@ -12,10 +14,17 @@ const openai = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
 });
 
-app.event('app_mention', async ({ event, client, logger }) => {
-    logger.info({ event });
+const db = new DatabaseSync('files.db');
 
-    const { channel, ts, thread_ts } = event;
+db.exec('CREATE TABLE IF NOT EXISTS files (slack_file_id TEXT PRIMARY KEY, openai_file_id TEXT, openai_file_type TEXT) STRICT');
+
+const insert = db.prepare('INSERT INTO files VALUES (?, ?, ?)');
+const select = db.prepare('SELECT * FROM files WHERE slack_file_id=?');
+
+app.event('app_mention', async ({ event, client, logger }) => {
+    logger.info(util.inspect(event, { depth: null }));
+
+    const { channel, ts, thread_ts, files } = event;
 
     // Indicate that the request is being processed.
     const add_reaction = client.reactions.add({
@@ -31,9 +40,25 @@ app.event('app_mention', async ({ event, client, logger }) => {
         ts: thread_ts || ts,    // Reply to a thread.
     });
 
-    const [_, { user_id }, { messages }] = await Promise.all([add_reaction, test_auth, get_replies]);
+    const create_file = Promise.all(
+        (files ?? []).map(async (meta) => {
+            const downloaded = await fetch(meta.url_private_download, { headers: { Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}` } });
+            const buffer = Buffer.from(await downloaded.arrayBuffer());
+            const file = new File([buffer], meta.name, { type: meta.mimetype });
+            const uploaded = await openai.files.create({
+                file,
+                purpose: 'user_data',
+            });
+            logger.info(util.inspect(uploaded, { depth: null }));
+            const mimetype = meta.mimetype.split('/')[0];
+            const type = mimetype === 'image' ? 'input_'.concat(mimetype) : 'input_file';
+            insert.run(meta.id, uploaded.id, type);
+        })
+    );
 
-    logger.info({ messages });
+    const [, { user_id }, { messages }, ] = await Promise.all([add_reaction, test_auth, get_replies, create_file]);
+
+    logger.info(util.inspect(messages, { depth: null }));
 
     const input = messages
         .filter((message) => 
@@ -42,20 +67,32 @@ app.event('app_mention', async ({ event, client, logger }) => {
         )
         .map((message) => {
             const { user, text } = message;
-            const role = user === user_id ? 'assistant' : 'user';
-            const content = text.replace(/^<@U[A-Z0-9]+>\s*/, '');
-            return { role, content };
-        })
-        .filter((message) => message.content !== '');
+            if (user === user_id) {
+                return { role: 'assistant', content: text };
+            } else {
+                const input_files = (message.files ?? []).map((file) => {
+                    const result = select.get(file.id);
+                    return { type: result.openai_file_type, file_id: result.openai_file_id };
+                });
+                const content = [
+                    { 
+                        type: 'input_text', 
+                        text: text.replace(/^<@U[A-Z0-9]+>\s*/, '')
+                    },
+                    ...input_files
+                ];
+                return { role: 'user', content };
+            }
+        });
 
-    logger.info({ input });
+    logger.info(util.inspect(input, { depth: null }));
 
     const response = await openai.responses.create({
-        model: 'gpt-4o-mini',
-        input
+        model: 'gpt-4o',
+        input,
     });
 
-    logger.info({ response });
+    logger.info(util.inspect(response, { depth: null }));
 
     const post_message = client.chat.postMessage({
         channel,

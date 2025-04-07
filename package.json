@@ -10,6 +10,8 @@
   "description": "",
   "dependencies": {
     "@slack/bolt": "^4.2.1",
-    "openai": "^4.91.1"
+    "fs": "^0.0.1-security",
+    "openai": "^4.91.1",
+    "sqlite3": "^5.1.7"
   }
 }
